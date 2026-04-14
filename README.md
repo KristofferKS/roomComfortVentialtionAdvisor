@@ -11,3 +11,7 @@
 
 to see example for BLE temperature and humidity sensor visit:
 https://github.com/KristofferKS/Home-Climate
+
+## Run displey
+run the command through ssh:
+`sudo xinit /home/edge/.xinitrc -- :0 vt1`
