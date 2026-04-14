@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Live IoT Sensor Dashboard for Raspberry Pi (Tkinter version)
+Live IoT Sensor Dashboard for Raspberry Pi (Tkinter + Matplotlib)
 Usage: python dashboard.py --csv comtek-6-631.csv --refresh 5
 
-Displays live-updating sensor readings for temperature, humidity, light,
-and CO2 with comfort warnings.
+Displays live-updating sensor readings. Click on a sensor panel to show
+a graph of its recent history.
 """
 import tkinter as tk
 from tkinter import font
@@ -13,6 +13,13 @@ import re
 import argparse
 import os
 from datetime import datetime, timedelta
+
+# Matplotlib for graphing
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.dates as mdates
 
 # ── Config ────────────────────────────────────────────────────────────────────
 LIMITS = {
@@ -29,6 +36,8 @@ TOPIC_MAP = {
     "light":       [r"light"],
 }
 
+HISTORY_MINUTES = 30
+
 # ── Style ─────────────────────────────────────────────────────────────────────
 STYLE = {
     "BG":        "#0D0D0D",
@@ -44,7 +53,6 @@ def load_data(csv_file):
     if not os.path.exists(csv_file):
         return pd.DataFrame(columns=["topic", "value", "timestamp"])
     try:
-        # Read, coercing errors and dropping rows with invalid data
         df = pd.read_csv(csv_file, header=None, names=["userid","group","topic","value","st_label","timestamp","rt_label","rt"], usecols=[2,3,5])
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
@@ -56,7 +64,6 @@ def load_data(csv_file):
         return pd.DataFrame(columns=["topic", "value", "timestamp"])
 
 def categorize(df):
-    """Return dict of category → filtered DataFrame."""
     result = {}
     for cat, patterns in TOPIC_MAP.items():
         mask = pd.Series([False] * len(df), index=df.index)
@@ -68,16 +75,20 @@ def categorize(df):
 def latest_value(sub_df):
     return sub_df.iloc[-1]["value"] if not sub_df.empty else None
 
+def recent(sub_df, minutes=HISTORY_MINUTES):
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    return sub_df[sub_df["timestamp"] >= cutoff]
+
 # ── GUI Components ────────────────────────────────────────────────────────────
 class SensorDisplay(tk.Frame):
-    def __init__(self, parent, category, **kwargs):
-        super().__init__(parent, bg=STYLE["PANEL_BG"], bd=2, relief="groove", **kwargs)
+    def __init__(self, parent, category, click_callback, **kwargs):
+        super().__init__(parent, bg=STYLE["PANEL_BG"], bd=1, relief="solid", **kwargs)
         self.category = category
         self.limits = LIMITS[category]
         
         self.label_font = font.Font(family="monospace", size=10, weight="bold")
-        self.value_font = font.Font(family="monospace", size=36, weight="bold")
-        self.unit_font = font.Font(family="monospace", size=12)
+        self.value_font = font.Font(family="monospace", size=28, weight="bold")
+        self.unit_font = font.Font(family="monospace", size=10)
         self.warn_font = font.Font(family="monospace", size=8)
 
         self.lbl_name = tk.Label(self, text=category.upper(), font=self.label_font, bg=STYLE["PANEL_BG"], fg=STYLE["MUTED"])
@@ -91,6 +102,14 @@ class SensorDisplay(tk.Frame):
 
         self.lbl_warn = tk.Label(self, text="", font=self.warn_font, bg=STYLE["PANEL_BG"], fg=STYLE["WARN_COL"])
         self.lbl_warn.pack(pady=(0, 10))
+
+        # Bind click event to all child widgets
+        self.bind_all_children("<Button-1>", lambda e: click_callback(self.category))
+
+    def bind_all_children(self, event, callback):
+        self.bind(event, callback)
+        for child in self.winfo_children():
+            child.bind(event, callback)
 
     def update_value(self, value):
         if value is None:
@@ -114,36 +133,100 @@ class DashboardApp(tk.Tk):
         super().__init__()
         self.csv_file = csv_file
         self.refresh_ms = refresh_sec * 1000
+        self.full_df = pd.DataFrame()
 
         self.title("IoT Sensor Dashboard")
         self.configure(bg=STYLE["BG"])
-        self.geometry("800x280")
+        # Set fixed size for 800x480 screen and disable resizing
+        self.geometry("800x480")
+        self.resizable(False, False)
+
+        # --- Main Layout ---
+        self.grid_rowconfigure(2, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
         # Title
         title_font = font.Font(family="monospace", size=14, weight="bold")
         lbl_title = tk.Label(self, text="SENSOR DASHBOARD // comtek-6-631", font=title_font, bg=STYLE["BG"], fg=STYLE["TEXT_COL"])
-        lbl_title.pack(pady=15)
+        lbl_title.grid(row=0, column=0, pady=10)
 
-        # Sensor panels
-        main_frame = tk.Frame(self, bg=STYLE["BG"])
-        main_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        # Top frame for sensor panels
+        top_frame = tk.Frame(self, bg=STYLE["BG"])
+        top_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
         
         self.displays = {}
         categories = ["temperature", "humidity", "co2", "light"]
         for i, cat in enumerate(categories):
-            self.displays[cat] = SensorDisplay(main_frame, cat)
-            self.displays[cat].pack(side="left", fill="both", expand=True, padx=5)
+            top_frame.grid_columnconfigure(i, weight=1)
+            self.displays[cat] = SensorDisplay(top_frame, cat, self.draw_graph)
+            self.displays[cat].grid(row=0, column=i, sticky="nsew", padx=5)
+
+        # Bottom frame for graph
+        graph_frame = tk.Frame(self, bg=STYLE["PANEL_BG"], bd=1, relief="solid")
+        graph_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(5, 10))
+        self.setup_graph(graph_frame)
 
         # Status bar
         self.status_font = font.Font(family="monospace", size=8)
         self.lbl_status = tk.Label(self, text="Initializing...", font=self.status_font, bg=STYLE["BG"], fg=STYLE["MUTED"], anchor="e")
-        self.lbl_status.pack(side="right", fill="x", padx=10, pady=5)
+        self.lbl_status.grid(row=3, column=0, sticky="e", padx=10, pady=5)
 
         self.update_dashboard()
 
+    def setup_graph(self, parent_frame):
+        # Adjusted figure size and DPI for 800x480 screen
+        fig = Figure(figsize=(7.8, 2.5), dpi=100, facecolor=STYLE["BG"])
+        # Manually set subplot padding to ensure labels fit
+        fig.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.1)
+        
+        self.ax = fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(fig, master=parent_frame)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.draw_graph(None) # Initial empty graph
+
+    def draw_graph(self, category):
+        self.ax.clear()
+        self.ax.set_facecolor(STYLE["PANEL_BG"])
+        self.ax.tick_params(axis='x', colors=STYLE["MUTED"], labelsize=7, rotation=30)
+        self.ax.tick_params(axis='y', colors=STYLE["MUTED"], labelsize=7)
+        self.ax.spines['top'].set_visible(False)
+        self.ax.spines['right'].set_visible(False)
+        self.ax.spines['bottom'].set_color(STYLE["MUTED"])
+        self.ax.spines['left'].set_color(STYLE["MUTED"])
+        self.ax.grid(color=STYLE["MUTED"], linestyle='--', linewidth=0.5, alpha=0.2)
+
+        if category is None or self.full_df.empty:
+            self.ax.text(0.5, 0.5, "Click a sensor panel to view graph", ha="center", va="center", color=STYLE["MUTED"], transform=self.ax.transAxes)
+            self.canvas.draw()
+            return
+
+        lim = LIMITS[category]
+        color = lim["color"]
+        sub_df = categorize(self.full_df).get(category, pd.DataFrame())
+        data = recent(sub_df)
+
+        if data.empty:
+            self.ax.text(0.5, 0.5, "No recent data for this sensor", ha="center", va="center", color=STYLE["MUTED"], transform=self.ax.transAxes)
+        else:
+            self.ax.plot(data["timestamp"], data["value"], color=color, linewidth=1.8)
+            self.ax.fill_between(data["timestamp"], data["value"], color=color, alpha=0.15)
+            
+            # Comfort zone
+            self.ax.axhspan(lim["min"], lim["max"], alpha=0.1, color=STYLE["OK_COL"], zorder=0)
+
+        # Set fixed Y-axis for temperature
+        if category == "temperature":
+            self.ax.set_ylim(18, 28)
+
+        self.ax.set_title(f"{category.upper()} - Last {HISTORY_MINUTES} Minutes", color=color, fontsize=9, family="monospace")
+        self.ax.set_ylabel(lim["unit"], color=STYLE["MUTED"], fontsize=8, family="monospace")
+        self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+        
+        self.canvas.draw()
+
     def update_dashboard(self):
-        df = load_data(self.csv_file)
-        categorized_data = categorize(df)
+        self.full_df = load_data(self.csv_file)
+        categorized_data = categorize(self.full_df)
 
         for cat, display in self.displays.items():
             sub_df = categorized_data.get(cat, pd.DataFrame())
@@ -157,7 +240,7 @@ class DashboardApp(tk.Tk):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Live IoT sensor dashboard (Tkinter)")
+    parser = argparse.ArgumentParser(description="Live IoT sensor dashboard (Tkinter + Matplotlib)")
     parser.add_argument("--csv", default="comtek-6-631.csv", help="Path to CSV file")
     parser.add_argument("--refresh", default=5, type=int, help="Refresh interval in seconds")
     args = parser.parse_args()
@@ -170,3 +253,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
