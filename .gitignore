@@ -1,5 +1,6 @@
 # General
 .git/
+*.png
 
 # Python
 __pycache__/
