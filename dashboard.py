@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Live IoT Sensor Dashboard for Raspberry Pi (Tkinter + Matplotlib)
-Usage: python dashboard.py --csv comtek-6-631.csv --refresh 5
+Usage: python dashboard.py --csv TheCoolGroup.csv --refresh 5
 
 Displays live-updating sensor readings. Click on a sensor panel to show
 a graph of its recent history.
@@ -30,13 +30,13 @@ LIMITS = {
 }
 
 TOPIC_MAP = {
-    "temperature": [r"temp"],
-    "humidity":    [r"humid"],
-    "co2":         [r"co2"],
-    "light":       [r"light"],
+    "temperature": [r"temperature_v1"],
+    "humidity":    [r"humidity_v1"],
+    "co2":         [r"co2_v1"],
+    "light":       [r"light_v1"],
 }
 
-HISTORY_MINUTES = 30
+HISTORY_MINUTES = 90
 
 # ── Style ─────────────────────────────────────────────────────────────────────
 STYLE = {
@@ -68,7 +68,7 @@ def categorize(df):
     for cat, patterns in TOPIC_MAP.items():
         mask = pd.Series([False] * len(df), index=df.index)
         for pat in patterns:
-            mask |= df["topic"].str.contains(pat, flags=re.IGNORECASE, na=False)
+            mask |= df["topic"].str.contains(pat, flags=re.IGNORECASE)
         result[cat] = df[mask].copy()
     return result
 
@@ -147,7 +147,7 @@ class DashboardApp(tk.Tk):
 
         # Title
         title_font = font.Font(family="monospace", size=14, weight="bold")
-        lbl_title = tk.Label(self, text="SENSOR DASHBOARD // comtek-6-631", font=title_font, bg=STYLE["BG"], fg=STYLE["TEXT_COL"])
+        lbl_title = tk.Label(self, text="SENSOR DASHBOARD // TheCoolGroup", font=title_font, bg=STYLE["BG"], fg=STYLE["TEXT_COL"])
         lbl_title.grid(row=0, column=0, pady=10)
 
         # Top frame for sensor panels
@@ -177,7 +177,7 @@ class DashboardApp(tk.Tk):
         # Adjusted figure size and DPI for 800x480 screen
         fig = Figure(figsize=(7.8, 2.5), dpi=100, facecolor=STYLE["BG"])
         # Manually set subplot padding to ensure labels fit
-        fig.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.1)
+        fig.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.175)
         
         self.ax = fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(fig, master=parent_frame)
@@ -241,7 +241,7 @@ class DashboardApp(tk.Tk):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Live IoT sensor dashboard (Tkinter + Matplotlib)")
-    parser.add_argument("--csv", default="comtek-6-631.csv", help="Path to CSV file")
+    parser.add_argument("--csv", default="TheCoolGroup.csv", help="Path to CSV file")
     parser.add_argument("--refresh", default=5, type=int, help="Refresh interval in seconds")
     args = parser.parse_args()
 
