@@ -1,98 +1,103 @@
 import asyncio
-import os
-import time
-from bleak import BleakClient, BleakScanner
+import traceback
+from bleak import BleakClient, BleakScanner, BleakError
 
-SERVICE_UUID = "7e2f6a91-8c3d-4b2a-9f6e-1c4d8a7b5e92"
+SERVICE_UUID        = "7e2f6a91-8c3d-4b2a-9f6e-1c4d8a7b5e92"
 CHARACTERISTIC_UUID = "a1b2c3d4-1234-5678-abcd-a1b2c3d4e5f6"
 
-# --- ASCII Art ---
-walking_man = [
-    r"""
-    \ O /
-     \|/
-     / 
-    """,
-    r"""
-     O
-    /|
-    / 
-    """
-]
+CSV_PATH            = "pir_output.csv"
+RECONNECT_DELAY     = 3.0   # seconds between reconnect attempts
+SCAN_TIMEOUT        = 30.0  # seconds to wait during BLE scan
 
-stop_hand = r"""
-      .--.
-     |o_o |
-     |:_/ |
-    //   \ 
-   (|     | )
-  / \_   _/ 
-  \___)=(___/
-"""
 
-def display_art(pir_status, frame_index):
-    """Display ASCII art based on PIR status"""
-    os.system('cls' if os.name == 'nt' else 'clear')
-    
-    if pir_status == "1":
-        print("Movement Detected!")
-        print(walking_man[frame_index % len(walking_man)])
-    else:
-        print("No Movement")
-        print(stop_hand)
+# ── Scanner ───────────────────────────────────────────────────────────────────
 
-async def scan_for_esp32():
-    """Scan for BLE devices with longer timeout"""
-    print("Scanning for BLE devices...")
+async def scan_for_esp32() -> str | None:
+    print("Scanning for ESP32 via BLE...")
+    found = asyncio.Event()
+    address = None
 
-    found_device = False
-    while not found_device:
-        devices = await BleakScanner.discover(timeout=1.0, return_adv=True)
-        
-        print(f"\nFound {len(devices)} devices:")
-        esp32_address = None
-        
-        for address, (device, adv_data) in devices.items():
-            name = device.name if device.name else "None"
-            # print(f"  {name:20s} {address}")
-            
-            # Check if this is ESP32_PIR
-            if device.name and "ESP32_PIR" in device.name:
-                esp32_address = address
-                found_device = True
-    
-    return esp32_address
+    def on_detection(device, adv_data):
+        nonlocal address
+        if adv_data and adv_data.service_uuids:
+            if SERVICE_UUID.lower() in [s.lower() for s in adv_data.service_uuids]:
+                print(f"✓ Found ESP32: {device.address}")
+                address = device.address
+                found.set()
 
-async def connect_and_read(address):
-    """Connect to ESP32 and read the characteristic"""
+    scanner = BleakScanner(on_detection)
+    await scanner.start()
     try:
+        await asyncio.wait_for(found.wait(), timeout=SCAN_TIMEOUT)
+    except asyncio.TimeoutError:
+        print("✗ Scan timed out — is the ESP32 advertising?")
+    finally:
+        await scanner.stop()
+
+    return address
+
+
+# ── Notification handler ──────────────────────────────────────────────────────
+
+def make_notify_handler(last_state: list):
+    """
+    Returns a callback for start_notify.
+    last_state is a 1-element list so the closure can mutate it.
+    """
+    def handler(sender, data: bytearray):
+        value = data.decode("utf-8").strip()
+        if value != last_state[0]:
+            last_state[0] = value
+            print(f"PIR Status: {value}")
+            with open(CSV_PATH, "w") as f:
+                f.write(value)
+    return handler
+
+
+# ── Connection loop ───────────────────────────────────────────────────────────
+
+async def run_client(address: str):
+    """
+    Connects, subscribes to notifications, and keeps reconnecting
+    whenever the link drops.
+    """
+    last_state = [None]   # mutable container for the closure
+
+    while True:
         print(f"\nConnecting to {address}...")
-        async with BleakClient(address, timeout=10.0) as client:
-            print(f"Connected")
-            
-            frame_index = 0
-            while True:
-                # Read the characteristic
-                value = await client.read_gatt_char(CHARACTERISTIC_UUID)
-                pir_status = value.decode('utf-8')
-                
-                display_art(pir_status, frame_index)
-                
-                if pir_status == "1":
-                    frame_index += 1
-                
-                await asyncio.sleep(0.2)  # Wait before reading again
-            
-    except Exception as e:
-        print(f"Error: {e}")
+        try:
+            async with BleakClient(address, timeout=10.0) as client:
+                print("Connected — subscribing to notifications")
+
+                await client.start_notify(
+                    CHARACTERISTIC_UUID,
+                    make_notify_handler(last_state)
+                )
+
+                # Block here until the connection drops
+                while client.is_connected:
+                    await asyncio.sleep(0.5)
+
+                print("Connection lost")
+
+        except BleakError as e:
+            print(f"BLE error: {e}")
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            traceback.print_exc()
+
+        print(f"Retrying in {RECONNECT_DELAY}s...")
+        await asyncio.sleep(RECONNECT_DELAY)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main():
     address = await scan_for_esp32()
-    
     if address:
-        await connect_and_read(address)
+        await run_client(address)
     else:
-        print("\n✗ ESP32_PIR not found.")
+        print("✗ ESP32_PIR not found.")
 
 if __name__ == "__main__":
     asyncio.run(main())

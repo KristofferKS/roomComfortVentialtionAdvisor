@@ -20,6 +20,9 @@ BLECharacteristic *pPirCharacteristic;
 bool deviceConnected    = false;
 bool oldDeviceConnected = false;
 int  lastMotionState    = -1; // Force first update on boot
+unsigned long lastMotionTime = 0;
+const unsigned long motionHoldTime = 60000; // 1 minute in ms
+bool motionActive = false;
 
 class MyServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *pServer) {
@@ -52,7 +55,7 @@ void setup() {
     BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
   );
   pPirCharacteristic->addDescriptor(new BLE2902());
-  pPirCharacteristic->setValue("motion:0");
+  pPirCharacteristic->setValue("0");
 
   pService->start();
 
@@ -64,30 +67,49 @@ void setup() {
 
 void loop() {
   int motion = digitalRead(PIR_PIN);
+  unsigned long now = millis();
 
-  // Only act on state change
-  if (motion != lastMotionState) {
-    lastMotionState = motion;
+  // If motion detected → reset timer
+  if (motion == HIGH) {
+    lastMotionTime = now;
 
-    if (motion == HIGH) {
-      digitalWrite(LED_BUILTIN, HIGH);
+    if (!motionActive) {
       Serial.println("Motion detected!");
-      pPirCharacteristic->setValue("motion:1");
+      motionActive = true;
+    }
+  }
+
+  // Check if we are still within the 1-minute window
+  bool shouldBeActive = (now - lastMotionTime) < motionHoldTime;
+
+  // Only update if state changes
+  if (shouldBeActive != motionActive) {
+    motionActive = shouldBeActive;
+
+    if (motionActive) {
+      digitalWrite(LED_BUILTIN, HIGH);
+      Serial.println("Motion ACTIVE (holding)");
+      pPirCharacteristic->setValue("1");
     } else {
       digitalWrite(LED_BUILTIN, LOW);
-      Serial.println("No motion.");
-      pPirCharacteristic->setValue("motion:0");
+      Serial.println("Motion timeout → OFF");
+      pPirCharacteristic->setValue("0");
     }
 
-    // Notify connected client of motion change immediately
     if (deviceConnected) {
       pPirCharacteristic->notify();
     }
   }
 
-  // Handle reconnection
+  // Optional: keep notifying "motion:1" periodically while active
+  if (motionActive && deviceConnected) {
+    pPirCharacteristic->setValue("1");
+    pPirCharacteristic->notify();
+  }
+
+  // Handle reconnection (unchanged)
   if (!deviceConnected && oldDeviceConnected) {
-    delay(500);
+    delay(100);
     BLEDevice::startAdvertising();
     Serial.println("Restarted advertising");
     oldDeviceConnected = false;
@@ -97,5 +119,5 @@ void loop() {
     oldDeviceConnected = true;
   }
 
-  delay(100);
+  delay(1000); // much faster loop than 5s
 }
