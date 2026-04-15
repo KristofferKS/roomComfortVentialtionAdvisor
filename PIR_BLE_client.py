@@ -1,6 +1,9 @@
 import asyncio
 import traceback
+import os
+import logging
 from bleak import BleakClient, BleakScanner, BleakError
+from bleak.backends.device import BLEDevice
 
 SERVICE_UUID        = "7e2f6a91-8c3d-4b2a-9f6e-1c4d8a7b5e92"
 CHARACTERISTIC_UUID = "a1b2c3d4-1234-5678-abcd-a1b2c3d4e5f6"
@@ -10,19 +13,26 @@ RECONNECT_DELAY     = 3.0   # seconds between reconnect attempts
 SCAN_TIMEOUT        = 30.0  # seconds to wait during BLE scan
 
 
+def _configure_logging() -> None:
+    """Enable verbose Bleak/DBus logging when BLEAK_DEBUG is set."""
+    if os.getenv("BLEAK_DEBUG"):
+        logging.basicConfig(level=logging.DEBUG)
+        logging.getLogger("bleak").setLevel(logging.DEBUG)
+
+
 # ── Scanner ───────────────────────────────────────────────────────────────────
 
-async def scan_for_esp32() -> str | None:
+async def scan_for_esp32() -> BLEDevice | None:
     print("Scanning for ESP32 via BLE...")
     found = asyncio.Event()
-    address = None
+    found_device: BLEDevice | None = None
 
     def on_detection(device, adv_data):
-        nonlocal address
+        nonlocal found_device
         if adv_data and adv_data.service_uuids:
             if SERVICE_UUID.lower() in [s.lower() for s in adv_data.service_uuids]:
                 print(f"✓ Found ESP32: {device.address}")
-                address = device.address
+                found_device = device
                 found.set()
 
     scanner = BleakScanner(on_detection)
@@ -34,7 +44,7 @@ async def scan_for_esp32() -> str | None:
     finally:
         await scanner.stop()
 
-    return address
+    return found_device
 
 
 # ── Notification handler ──────────────────────────────────────────────────────
@@ -56,7 +66,7 @@ def make_notify_handler(last_state: list):
 
 # ── Connection loop ───────────────────────────────────────────────────────────
 
-async def run_client(address: str):
+async def run_client(device: BLEDevice):
     """
     Connects, subscribes to notifications, and keeps reconnecting
     whenever the link drops.
@@ -64,9 +74,9 @@ async def run_client(address: str):
     last_state = [None]   # mutable container for the closure
 
     while True:
-        print(f"\nConnecting to {address}...")
         try:
-            async with BleakClient(address, timeout=10.0) as client:
+            print(f"\nConnecting to {device.address}...")
+            async with BleakClient(device, timeout=20.0) as client:
                 print("Connected — subscribing to notifications")
 
                 await client.start_notify(
@@ -79,6 +89,14 @@ async def run_client(address: str):
                     await asyncio.sleep(0.5)
 
                 print("Connection lost")
+
+        except (asyncio.TimeoutError, TimeoutError, asyncio.CancelledError):
+            # On BlueZ (common on Raspberry Pi), a timeout here is often caused by
+            # stale device state or private address rotation. Re-scan to refresh.
+            print("Connection timed out — re-scanning before retry")
+            rescanned = await scan_for_esp32()
+            if rescanned is not None:
+                device = rescanned
 
         except BleakError as e:
             print(f"BLE error: {e}")
@@ -93,9 +111,10 @@ async def run_client(address: str):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main():
-    address = await scan_for_esp32()
-    if address:
-        await run_client(address)
+    _configure_logging()
+    device = await scan_for_esp32()
+    if device:
+        await run_client(device)
     else:
         print("✗ ESP32_PIR not found.")
 

@@ -105,7 +105,7 @@ class SensorDisplay(tk.Frame):
 
         # Bind click event to all child widgets
         self.bind_all_children("<Button-1>", lambda e: click_callback(self.category))
-
+    
     def bind_all_children(self, event, callback):
         self.bind(event, callback)
         for child in self.winfo_children():
@@ -147,8 +147,8 @@ class DashboardApp(tk.Tk):
 
         # Title
         title_font = font.Font(family="monospace", size=14, weight="bold")
-        lbl_title = tk.Label(self, text="SENSOR DASHBOARD // TheCoolGroup", font=title_font, bg=STYLE["BG"], fg=STYLE["TEXT_COL"])
-        lbl_title.grid(row=0, column=0, pady=10)
+        self.lbl_title = tk.Label(self, text="SENSOR DASHBOARD // TheCoolGroup", font=title_font, bg=STYLE["BG"], fg=STYLE["TEXT_COL"])
+        self.lbl_title.grid(row=0, column=0, pady=10)
 
         # Top frame for sensor panels
         top_frame = tk.Frame(self, bg=STYLE["BG"])
@@ -172,6 +172,25 @@ class DashboardApp(tk.Tk):
         self.lbl_status.grid(row=3, column=0, sticky="e", padx=10, pady=5)
 
         self.update_dashboard()
+        self.movement()
+
+
+    def movement(self):
+        #Method for opening pir_ouput.csv and checking if the value is 1 or 0, then updating the title label accordingly
+        try:
+            with open("pir_output.csv", "r") as f:
+                value = f.read().strip()
+                if value == "1":
+                    self.lbl_title.config(text="SENSOR DASHBOARD // TheCoolGroup - MOVEMENT DETECTED", fg=STYLE["TEXT_COL"])
+                elif value == "0":
+                    self.lbl_title.config(text="SENSOR DASHBOARD // TheCoolGroup - No movement", fg=STYLE["TEXT_COL"])
+                else:
+                    self.lbl_title.config(text="SENSOR DASHBOARD // TheCoolGroup - Invalid PIR value", fg=STYLE["WARN_COL"])
+        except Exception as e:
+            print(f"[Error reading PIR data] {e}")
+            self.lbl_title.config(text="SENSOR DASHBOARD // TheCoolGroup - PIR data error", fg=STYLE["MUTED"])
+        self.after(2000, self.movement) # Check every 2 seconds
+
 
     def setup_graph(self, parent_frame):
         # Adjusted figure size and DPI for 800x480 screen
@@ -235,7 +254,7 @@ class DashboardApp(tk.Tk):
         
         timestamp = datetime.now().strftime('%H:%M:%S')
         self.lbl_status.config(text=f"Last Update: {timestamp}")
-        
+
         self.after(self.refresh_ms, self.update_dashboard)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
