@@ -12,6 +12,9 @@ CSV_PATH            = "pir_output.csv"
 RECONNECT_DELAY     = 3.0   # seconds between reconnect attempts
 SCAN_TIMEOUT        = 30.0  # seconds to wait during BLE scan
 
+# BlueZ adapter to use on Linux (e.g. "hci0", "hci1").
+BLE_ADAPTER         = os.getenv("BLE_ADAPTER", "hci1")
+
 
 def _configure_logging() -> None:
     """Enable verbose Bleak/DBus logging when BLEAK_DEBUG is set."""
@@ -20,10 +23,39 @@ def _configure_logging() -> None:
         logging.getLogger("bleak").setLevel(logging.DEBUG)
 
 
+def _adapter_exists(adapter: str) -> bool:
+    # Linux/BlueZ adapters show up as /sys/class/bluetooth/hciX
+    return os.path.isdir(f"/sys/class/bluetooth/{adapter}")
+
+
+def resolve_ble_adapter(preferred: str) -> str:
+    """Return a usable adapter name; fall back to hci0 when preferred is missing."""
+    if _adapter_exists(preferred):
+        return preferred
+
+    if preferred != "hci0" and _adapter_exists("hci0"):
+        print(f"Adapter '{preferred}' not found; falling back to 'hci0'")
+        return "hci0"
+
+    try:
+        candidates = sorted(
+            d for d in os.listdir("/sys/class/bluetooth") if d.startswith("hci")
+        )
+    except FileNotFoundError:
+        candidates = []
+
+    if candidates:
+        print(f"Adapter '{preferred}' not found; using '{candidates[0]}'")
+        return candidates[0]
+
+    # Nothing to validate against (non-Linux or /sys not mounted). Keep preferred.
+    return preferred
+
+
 # ── Scanner ───────────────────────────────────────────────────────────────────
 
-async def scan_for_esp32() -> BLEDevice | None:
-    print("Scanning for ESP32 via BLE...")
+async def scan_for_esp32(adapter: str = BLE_ADAPTER) -> BLEDevice | None:
+    print(f"Scanning for ESP32 via BLE (adapter={adapter})...")
     found = asyncio.Event()
     found_device: BLEDevice | None = None
 
@@ -35,14 +67,22 @@ async def scan_for_esp32() -> BLEDevice | None:
                 found_device = device
                 found.set()
 
-    scanner = BleakScanner(on_detection)
-    await scanner.start()
+    scanner = BleakScanner(on_detection, bluez={"adapter": adapter})
+    started = False
     try:
+        await scanner.start()
+        started = True
         await asyncio.wait_for(found.wait(), timeout=SCAN_TIMEOUT)
+    except BleakError as e:
+        print(f"BLE scan error (adapter={adapter}): {e}")
+        if adapter != "hci0":
+            print("Falling back to adapter 'hci0' and re-scanning")
+            return await scan_for_esp32(adapter="hci0")
     except asyncio.TimeoutError:
         print("✗ Scan timed out — is the ESP32 advertising?")
     finally:
-        await scanner.stop()
+        if started:
+            await scanner.stop()
 
     return found_device
 
@@ -66,7 +106,7 @@ def make_notify_handler(last_state: list):
 
 # ── Connection loop ───────────────────────────────────────────────────────────
 
-async def run_client(device: BLEDevice):
+async def run_client(device: BLEDevice, adapter: str = BLE_ADAPTER):
     """
     Connects, subscribes to notifications, and keeps reconnecting
     whenever the link drops.
@@ -75,8 +115,8 @@ async def run_client(device: BLEDevice):
 
     while True:
         try:
-            print(f"\nConnecting to {device.address}...")
-            async with BleakClient(device, timeout=20.0) as client:
+            print(f"\nConnecting to {device.address} (adapter={adapter})...")
+            async with BleakClient(device, timeout=20.0, bluez={"adapter": adapter}) as client:
                 print("Connected — subscribing to notifications")
 
                 await client.start_notify(
@@ -94,7 +134,7 @@ async def run_client(device: BLEDevice):
             # On BlueZ (common on Raspberry Pi), a timeout here is often caused by
             # stale device state or private address rotation. Re-scan to refresh.
             print("Connection timed out — re-scanning before retry")
-            rescanned = await scan_for_esp32()
+            rescanned = await scan_for_esp32(adapter=adapter)
             if rescanned is not None:
                 device = rescanned
 
@@ -112,9 +152,11 @@ async def run_client(device: BLEDevice):
 
 async def main():
     _configure_logging()
-    device = await scan_for_esp32()
+
+    adapter = resolve_ble_adapter(BLE_ADAPTER)
+    device = await scan_for_esp32(adapter=adapter)
     if device:
-        await run_client(device)
+        await run_client(device, adapter=adapter)
     else:
         print("✗ ESP32_PIR not found.")
 
