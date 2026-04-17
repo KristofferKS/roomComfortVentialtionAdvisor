@@ -260,7 +260,7 @@ class DashboardApp(tk.Tk):
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Live IoT sensor dashboard (Tkinter + Matplotlib)")
-    parser.add_argument("--csv", default="TheCoolGroup.csv", help="Path to CSV file")
+    parser.add_argument("--csv", default="TheCoolGroup_v2.csv", help="Path to CSV file")
     parser.add_argument("--refresh", default=5, type=int, help="Refresh interval in seconds")
     args = parser.parse_args()
 
